@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# 작업·결과·캐시 (대용량, repo 부적합)
+work/
+work_backup_*/
+archive/
+output/
+cache/
+logs/
+
+# 봇 상태 캐시
+.vlist_state.json
+
+# 미디어 산물 (실수 방지)
+*.mp4
+*.wav
+*.mp3
+
+# 민감 정보
+config/*.env
+*.env
+*.env.*
+!*.env.example
+
+# 백업/스냅샷
+*.bak
+*.bak-*
+*.bak.*
+*.bak_*
+backup-*/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# scripts/ 작업 산물 (영상별 임시 디렉토리 — 운영 스크립트 .py·.sh는 보존)
+scripts/*_20*/

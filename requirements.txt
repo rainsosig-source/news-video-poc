@@ -1,0 +1,13 @@
+kokoro>=0.7.0
+torch>=2.4.0
+torchaudio>=2.4.0
+diffusers>=0.30.0
+transformers>=4.45.0
+accelerate>=1.0.0
+sentencepiece
+protobuf
+pillow
+soundfile
+openai-whisper>=20240930
+requests
+numpy<2
