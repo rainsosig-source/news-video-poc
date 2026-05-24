@@ -1,4 +1,7 @@
-"""TTS 생성: 한국어(Edge TTS, 503 시 Zonos 폴백) + 영어(Kokoro). 단락별 wav + 문장 단위 타임스탬프 반환."""
+"""TTS 생성: 한국어(Supertonic on-device, 기본) + 영어(Kokoro). 단락별 wav + 문장 단위 타임스탬프 반환.
+
+2026-05-19: Edge TTS → Supertonic 마이그(팟캐스트와 동일 백엔드 통일).
+환경변수 USE_EDGE_TTS=1 로 폴백 가능."""
 import asyncio
 import json
 import os
@@ -9,18 +12,48 @@ import numpy as np
 import soundfile as sf
 from pathlib import Path
 
-EDGE_KO_VOICE = "ko-KR-InJoonNeural"
+EDGE_KO_VOICE = "ko-KR-InJoonNeural"   # Edge fallback only
 EDGE_KO_RATE  = "+0%"
+SUPERTONIC_VOICE = os.environ.get("SUPERTONIC_VOICE", "M1")  # 영상 뉴스 화자 (상현). 카테고리별 분기 가능
 KOKORO_EN_VOICE = "af_heart"
 SILENCE_PARA_SEC = 0.4    # 단락 사이 무음
 SILENCE_SENT_SEC = 0.15   # 문장 사이 무음
 SAMPLE_RATE = 24000
+
+USE_SUPERTONIC = os.environ.get("USE_EDGE_TTS", "0") != "1"
+_supertonic_tts = None
+_supertonic_style_cache = None
 
 EDGE_RETRY_BACKOFFS = [5, 15, 45]  # 503 등 일시 장애 재시도 (초)
 ZONOS_VENV_PY = "/home/sddari/tts_eval/venv_zonos/bin/python"
 ZONOS_RUNNER  = "/home/sddari/news_video_poc/lib/zonos_run.py"
 ZONOS_FALLBACK_ENABLED = os.environ.get("ZONOS_FALLBACK", "0") == "1"  # 기본 비활성 (음성 품질 미충족)
 EDGE_GLOBAL_LOCK = "/tmp/sosig_edge_tts.lock"  # 팟캐스트와 공유 (동일 IP rate-limit 회피)
+
+
+def _supertonic_load():
+    global _supertonic_tts, _supertonic_style_cache
+    if _supertonic_tts is None:
+        from supertonic import TTS
+        _supertonic_tts = TTS(auto_download=True)
+        _supertonic_style_cache = _supertonic_tts.get_voice_style(voice_name=SUPERTONIC_VOICE)
+    return _supertonic_tts, _supertonic_style_cache
+
+
+def _supertonic_sentence_pcm(text: str) -> np.ndarray:
+    """Supertonic으로 한 문장 → SAMPLE_RATE Hz mono float32 PCM."""
+    tts, style = _supertonic_load()
+    with tempfile.TemporaryDirectory(prefix="st_") as tmp:
+        wav, _dur = tts.synthesize(text=text, lang="ko", voice_style=style, total_steps=8, speed=1.05)
+        wav_path = os.path.join(tmp, "out.wav")
+        tts.save_audio(wav, wav_path)
+        # 24000Hz mono로 리샘플 (Supertonic은 44100Hz)
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-i", wav_path,
+             "-ar", str(SAMPLE_RATE), "-ac", "1", "-f", "f32le", "-"],
+            capture_output=True,
+        )
+    return np.frombuffer(result.stdout, dtype=np.float32).copy()
 
 
 def _split_paragraphs(text: str) -> list[str]:
@@ -100,7 +133,9 @@ def _zonos_paragraph_fallback(sentences: list[str], tag: str) -> list[np.ndarray
 
 
 def _edge_generate_paragraph(text: str, fallback_tag: str = "p") -> tuple[np.ndarray, list[dict]]:
-    """단락 → (PCM numpy, 문장별 타임스탬프) — Edge TTS 기반, 503 시 단락 통째 Zonos 폴백."""
+    """단락 → (PCM numpy, 문장별 타임스탬프).
+    기본: Supertonic on-device. USE_EDGE_TTS=1이면 Edge TTS 폴백.
+    """
     sentences = _split_sentences_ko(text)
     inter_silence = np.zeros(int(SAMPLE_RATE * SILENCE_SENT_SEC), dtype=np.float32)
     chunks = []
@@ -108,22 +143,29 @@ def _edge_generate_paragraph(text: str, fallback_tag: str = "p") -> tuple[np.nda
     cursor = 0.0
 
     sentence_pcms: list[np.ndarray] | None = None
-    try:
-        with tempfile.TemporaryDirectory() as tmp:
-            sentence_pcms = []
-            for i, sent in enumerate(sentences):
-                mp3_path = os.path.join(tmp, f"s{i}.mp3")
-                asyncio.run(_edge_sentence_async(sent, mp3_path))
-                sentence_pcms.append(_mp3_to_pcm(mp3_path))
-    except Exception as e:
-        if ZONOS_FALLBACK_ENABLED:
-            print(f"    [Edge TTS 단락 실패] {type(e).__name__} → Zonos 폴백 시도", flush=True)
-            sentence_pcms = _zonos_paragraph_fallback(sentences, fallback_tag)
-        else:
-            # 폴백 비활성: Edge TTS 실패 시 영상 생성 자체를 실패시킴 (다음 cron 시 재시도)
-            # 활성화 환경변수: ZONOS_FALLBACK=1
-            print(f"    [Edge TTS 단락 실패] {type(e).__name__} — 폴백 비활성, 작업 중단", flush=True)
-            raise
+
+    if USE_SUPERTONIC:
+        try:
+            sentence_pcms = [_supertonic_sentence_pcm(sent) for sent in sentences]
+        except Exception as e:
+            print(f"    [Supertonic 실패] {type(e).__name__} → Edge TTS 시도", flush=True)
+            sentence_pcms = None
+
+    if sentence_pcms is None:
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                sentence_pcms = []
+                for i, sent in enumerate(sentences):
+                    mp3_path = os.path.join(tmp, f"s{i}.mp3")
+                    asyncio.run(_edge_sentence_async(sent, mp3_path))
+                    sentence_pcms.append(_mp3_to_pcm(mp3_path))
+        except Exception as e:
+            if ZONOS_FALLBACK_ENABLED:
+                print(f"    [Edge TTS 단락 실패] {type(e).__name__} → Zonos 폴백 시도", flush=True)
+                sentence_pcms = _zonos_paragraph_fallback(sentences, fallback_tag)
+            else:
+                print(f"    [TTS 단락 실패] {type(e).__name__} — 폴백 비활성, 작업 중단", flush=True)
+                raise
 
     for i, (sent, audio) in enumerate(zip(sentences, sentence_pcms)):
         dur = len(audio) / SAMPLE_RATE

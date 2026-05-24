@@ -250,6 +250,7 @@ def run() -> int:
 
     # ── Step 7: 이메일 발송 ──────────────────────────────────
     _log("[Step 7] 이메일 발송...", log_path)
+    email_ok = False
     try:
         email_sender.send_video_notification(
             slug=slug,
@@ -263,6 +264,7 @@ def run() -> int:
             ko_meta_path=ko_meta,
             en_meta_path=en_meta,
         )
+        email_ok = True
     except Exception as e:
         _log(f"  이메일 오류: {e}", log_path)
 
@@ -274,6 +276,18 @@ def run() -> int:
         ko_path=ko_out,
         en_path=en_out,
     )
+
+    # ── Step 9: 로컬 작업 폴더 삭제 (메일 성공 후, NAS 완성본은 보존) ──
+    # 메일 발송이 성공한 경우에만 삭제 — 실패 시 백업 없이 잃지 않도록 폴더 보존.
+    if email_ok:
+        _log("[Step 9] 로컬 작업 폴더 삭제...", log_path)
+        try:
+            shutil.rmtree(work_dir)
+            _log(f"  삭제 완료: {work_dir}", log_path)
+        except Exception as e:
+            _log(f"  삭제 오류 (무시): {e}", log_path)
+    else:
+        _log("[Step 9] 이메일 미발송 → 로컬 폴더 보존(삭제 안 함)", log_path)
 
     _log(f"=== 완료: {ko_title} ===", log_path)
     return 0

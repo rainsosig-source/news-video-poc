@@ -1,8 +1,29 @@
 """기사 본문 추출: Google News 리다이렉트 따라가기 + trafilatura."""
 import re
+import socket
+import ipaddress
 import urllib.parse
 import urllib.request
 from pathlib import Path
+
+_ALLOWED_SCHEMES = {"http", "https"}
+
+
+def _is_safe_url(url: str) -> bool:
+    """SSRF 방지: http(s)만 허용 + 사설/로컬/링크로컬 IP 차단."""
+    try:
+        p = urllib.parse.urlparse(url)
+        if p.scheme not in _ALLOWED_SCHEMES or not p.hostname:
+            return False
+        port = p.port or (443 if p.scheme == "https" else 80)
+        for *_, sockaddr in socket.getaddrinfo(p.hostname, port, proto=socket.IPPROTO_TCP):
+            ip = ipaddress.ip_address(sockaddr[0])
+            if (ip.is_private or ip.is_loopback or ip.is_link_local
+                    or ip.is_reserved or ip.is_multicast):
+                return False
+        return True
+    except Exception:
+        return False
 
 HEADERS = {
     "User-Agent": (
@@ -65,11 +86,13 @@ def fetch(article: dict) -> str:
     title = article.get("title", "")
     summary = article.get("summary", "")
 
-    if not url:
+    if not url or not _is_safe_url(url):
         return f"{title}\n\n{summary}"
 
     # Google News 리다이렉트 따라가기
     real_url = _follow_redirect(url)
+    if not _is_safe_url(real_url):  # SSRF: 리다이렉트 도착지 재검증 (file://·내부IP 차단)
+        return f"{title}\n\n{summary}"
 
     # trafilatura 시도
     text = _extract_trafilatura(real_url)

@@ -79,8 +79,8 @@ def select(articles: list[dict], already_covered: list[str] = None) -> dict:
     try:
         decision = json.loads(raw)
     except json.JSONDecodeError:
-        # 파싱 실패 시 첫 번째 화이트리스트 기사 선택
-        decision = {"selected_id": articles[0]["id"], "reason": "fallback", "skip": False}
+        # 파싱 실패 시 강제 선택하지 않고 스킵 — 의도치 않은 기사 발행 방지
+        return {"selected_id": None, "reason": "LLM JSON 파싱 실패 → 스킵", "skip": True, "article": None}
 
     if decision.get("skip"):
         decision["article"] = None
